@@ -12,6 +12,9 @@ Open App → Shop Page
    ↓ Login → Add products → Checkout
 ```
 
+## Railway - token staging: 98dc3e25-a6ea-4938-aadc-0c8843fbd7d8
+## Railway - token production: e6bb06d8-e108-4ff1-a83e-afe91e442988
+
 ## 🚀 Quick Start
 
 ```bash
