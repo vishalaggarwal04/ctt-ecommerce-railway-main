@@ -1,0 +1,9 @@
+{
+  "build": {
+    "docker": {
+      "args": {
+        "VITE_DEPLOYMENT_ID": "${VITE_DEPLOYMENT_ID}"
+      }
+    }
+  }
+}

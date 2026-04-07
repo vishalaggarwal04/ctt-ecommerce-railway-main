@@ -1,0 +1,236 @@
+name: React Vite → Railway CI/CD
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 1  —  LINT
+  # ─────────────────────────────────────────────────────────────────
+
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 2  —  BUILD
+  # ─────────────────────────────────────────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    name: Build
+    defaults:
+      run:
+        working-directory: client
+
+    outputs:
+      deployment_guid: ${{ steps.guid.outputs.deployment_guid }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Deployment GUID
+        id: guid
+        run: echo "deployment_guid=${{ github.run_number }}-${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build React (Vite)
+        run: npm run build
+
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 2  —  UNIT TESTS
+  # ─────────────────────────────────────────────────────────────────
+  unittests:
+    runs-on: ubuntu-latest
+    name: Unit Tests
+    needs: build
+    defaults:
+      run:
+        working-directory: client
+
+    outputs:
+      deployment_guid: ${{ needs.build.outputs.deployment_guid }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+        env:
+          NODE_ENV: test
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage/
+          retention-days: 7
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            echo "=== Coverage Summary ==="
+            cat coverage/coverage-summary.json | node -e "
+              const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+              const t = d.total;
+              console.log('Lines:     ' + t.lines.pct + '%');
+              console.log('Functions: ' + t.functions.pct + '%');
+              console.log('Branches:  ' + t.branches.pct + '%');
+            "
+          fi
+
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 3  —  Static Analysis
+  # ─────────────────────────────────────────────────────────────────
+  staticanalysis:
+    runs-on: ubuntu-latest
+    needs: unittests
+    name: Static Analysis
+    defaults:
+      run:
+        working-directory: client
+
+    outputs:
+      deployment_guid: ${{ needs.unittests.outputs.deployment_guid }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ── Dependency vulnerability scan ─────────────────────────
+      - name: Audit npm dependencies (security vulnerabilities)
+        run: npm audit --audit-level=high
+        continue-on-error: true   # Report but don't block on moderate vulnerabilities
+
+      # ── CodeQL analysis ───────────────────────────────────────
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+          queries:   security-and-quality
+
+      - name: Autobuild for CodeQL
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Run CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript
+
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 5  —  DOCKER BUILD & PUSH
+  # ─────────────────────────────────────────────────────────────────
+  push-image:
+    runs-on: ubuntu-latest
+    needs: staticanalysis
+    outputs:
+      deployment_guid: ${{ needs.staticanalysis.outputs.deployment_guid }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      #3️⃣ Login to Docker Hub
+      - name: Docker Login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 4️⃣ Build Docker Image
+      - name: Build Image
+        run: |
+          docker build \
+            --build-arg DEPLOYMENT_GUID=${{ needs.staticanalysis.outputs.deployment_guid }} \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ needs.staticanalysis.outputs.deployment_guid }} \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest \
+            .
+
+      # 5️⃣ Push Docker Image
+      - name: Push Image
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ needs.staticanalysis.outputs.deployment_guid }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
+
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 5  —  Deploy to Staging
+  # ─────────────────────────────────────────────────────────────────
+  deploy-staging:
+    runs-on: ubuntu-latest
+    name: Deploy to Staging
+    needs: push-image
+    environment: Staging
+    outputs:
+      deployment_guid: ${{ needs.push-image.outputs.deployment_guid }}
+    steps:
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Set Railway build arg and Deploy
+        run: |
+          railway variables set \
+            VITE_DEPLOYMENT_ID=${{ needs.push-image.outputs.deployment_guid }} \
+            --service ${{ secrets.RAILWAY_SERVICE_ID_STAGING }} \
+            --environment staging
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_STAGING }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+
+  # ─────────────────────────────────────────────────────────────────
+  # JOB 5  —  Deploy to Staging
+  # ─────────────────────────────────────────────────────────────────
+  deploy-production:
+    runs-on: ubuntu-latest
+    name: Deploy to Production
+    needs: deploy-staging
+    environment: vigilant-sparkle / production
+    steps:
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Set Railway build arg and Deploy
+        run: |
+          railway variables set \
+            VITE_DEPLOYMENT_ID=${{ needs.deploy-staging.outputs.deployment_guid }} \
+            --service ${{ secrets.RAILWAY_SERVICE_ID_PRODUCTION }} \
+            --environment production
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_PRODUCTION }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
