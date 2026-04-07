@@ -220,7 +220,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Deploy to Production
     needs: deploy-staging
-    environment: vigilant-sparkle / production
+    environment: production
     steps:
       - name: Install Railway CLI
         run: npm install -g @railway/cli
