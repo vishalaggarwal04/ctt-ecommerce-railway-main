@@ -22,7 +22,7 @@ function LandingPage() {
             Your premier destination for quality products
           </p>
           <p className="hero-description">
-            New CTT Explore our curated collection of fashion and lifestyle products.
+            MCart Explore our curated collection of fashion and lifestyle products.
             From trendy jackets to comfortable jeans, stylish shoes to premium shirts - 
             discover everything you need in one place.
           </p>
